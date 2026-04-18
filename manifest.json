@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "AA Processing Rules Exporter",
+  "version": "1.0.0",
+  "description": "Export Adobe Analytics Processing Rules as JSON (1.4 API format). No data is collected; all processing happens locally.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://experience.adobe.com/*", "https://www4.an.adobe.com/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AA Processing Rules Exporter",
+    "default_icon": {
+      "16": "icons/icon128.png",
+      "32": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon128.png",
+    "32": "icons/icon128.png",
+    "48": "icons/icon128.png",
+    "128": "icons/icon128.png"
+  }
+}

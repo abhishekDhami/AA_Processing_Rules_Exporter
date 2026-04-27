@@ -95,10 +95,9 @@ async function extractRules() {
     return null;
   }
   try {
-    if (!window.location.href.includes("www4.an.adobe.com/p/am/1.3")) {
-      return { error: "Please open the Processing Rules page." };
-    }
-    const scripts = document.querySelectorAll("script");
+    // if (!window.location.href.includes("www4.an.adobe.com/p/am/1.3")) {
+    //   return { error: "Please open the Processing Rules page." };
+    // }
 
     let rawRules = await waitForRules();
 

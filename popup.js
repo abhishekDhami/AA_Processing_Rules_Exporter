@@ -1,5 +1,15 @@
 let downloadBtn = document.getElementById("downloadBtn");
-let currentLogData = null;
+let progressFallbackTimer = null;
+let progressFallbackInterval = null;
+let activeProgressStage = null;
+const longWaitMessages = [
+  "Fetching processing rules...",
+  "Still fetching the rules...",
+  "The page is working on it...",
+  "Patience is part of the process...",
+  "Almost there - collecting the rules.",
+  "The browser is doing its magic...",
+];
 
 function escapeHtml(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
@@ -58,12 +68,76 @@ function downloadLogFile(message, diagnostics = {}) {
   URL.revokeObjectURL(url);
 }
 
+function animateTextChange(element, message) {
+  if (!element) return;
+
+  const timerKey = element === document.getElementById("status") ? "status" : "overlay";
+  if (!animateTextChange.timers) {
+    animateTextChange.timers = {};
+  }
+
+  clearTimeout(animateTextChange.timers[timerKey]);
+  element.style.opacity = "0";
+  animateTextChange.timers[timerKey] = window.setTimeout(() => {
+    element.textContent = message;
+    element.style.opacity = "1";
+  }, 220);
+}
+
+function updateProgressMessage(message) {
+  const status = document.getElementById("status");
+  if (!status) return;
+
+  animateTextChange(status, message);
+}
+
+function updateActiveStatus(message) {
+  updateLoadingMessage(message);
+  updateProgressMessage(message);
+}
+
+function clearProgressFallbackMessages() {
+  if (progressFallbackTimer) {
+    clearTimeout(progressFallbackTimer);
+    progressFallbackTimer = null;
+  }
+  if (progressFallbackInterval) {
+    clearInterval(progressFallbackInterval);
+    progressFallbackInterval = null;
+  }
+  activeProgressStage = null;
+}
+
+function startFetchingFallbackMessages() {
+  clearProgressFallbackMessages();
+  activeProgressStage = "fetching";
+
+  let index = 0;
+  const rotateMessage = () => {
+    if (activeProgressStage !== "fetching") return;
+
+    const message = longWaitMessages[index % longWaitMessages.length];
+    updateActiveStatus(message);
+    index += 1;
+  };
+
+  rotateMessage();
+  progressFallbackInterval = window.setInterval(rotateMessage, 5000);
+}
+
+function updateLoadingMessage(message) {
+  const loadingText = document.querySelector("#loadingOverlay .loading-text");
+  if (loadingText) {
+    animateTextChange(loadingText, message);
+  }
+}
+
 function renderStatus(message, isError = false, diagnostics = {}) {
   const status = document.getElementById("status");
-  currentLogData = { message, diagnostics };
 
   if (!isError) {
     status.innerHTML = escapeHtml(message);
+    status.style.opacity = "1";
     return;
   }
 
@@ -95,7 +169,10 @@ downloadBtn.addEventListener("click", async () => {
   const status = document.getElementById("status");
 
   try {
-    showLoader();
+    showLoader("Preparing extraction...");
+    updateActiveStatus("Fetching processing rules...");
+    startFetchingFallbackMessages();
+
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true }, //
       func: extractRules,
@@ -117,6 +194,9 @@ downloadBtn.addEventListener("click", async () => {
 
     const data = validResult.result;
 
+    clearProgressFallbackMessages();
+    updateActiveStatus("Creating download file...");
+
     const blob = new Blob([JSON.stringify(data, null, 2)], {
       type: "application/json",
     });
@@ -128,10 +208,14 @@ downloadBtn.addEventListener("click", async () => {
     a.download = `processing_rules_${data.rsid || "unknown"}_${Date.now()}.json`;
     a.click();
 
+    clearProgressFallbackMessages();
+    updateActiveStatus("Download complete");
     renderStatus("Downloaded successfully!", false);
     hideLoader();
   } catch (err) {
     console.error("Extraction failed", err);
+    clearProgressFallbackMessages();
+    updateActiveStatus("Extraction failed");
     renderStatus("Failed to extract rules.", true, {
       title: tab?.title,
       reason: err?.message || String(err),
@@ -166,8 +250,12 @@ async function extractRules() {
       return content.includes("createRuleSetsFromUI");
     });
 
+    const pageTitle = document.title || "Unknown";
+    const currentHref = window.location?.href || "";
+    const hasDynamicProcessingRules = currentHref.includes("feature=DynamicProcessingRules");
+
     return {
-      title: document.title,
+      title: hasDynamicProcessingRules ? `${pageTitle}|feature=DynamicProcessingRules` : pageTitle,
       scriptCount: scripts.length,
       matchingScriptCount: matchingScripts.length,
       steps: [],
@@ -391,12 +479,23 @@ async function extractRules() {
   }
 }
 
-function showLoader() {
-  document.getElementById("loadingOverlay").style.display = "flex";
+function showLoader(message = "Preparing extraction...") {
+  const overlay = document.getElementById("loadingOverlay");
+  if (overlay) {
+    overlay.style.display = "flex";
+  }
+
+  clearProgressFallbackMessages();
+  updateLoadingMessage(message);
+  updateProgressMessage(message);
   downloadBtn.disabled = true;
 }
 
 function hideLoader() {
-  document.getElementById("loadingOverlay").style.display = "none";
+  const overlay = document.getElementById("loadingOverlay");
+  if (overlay) {
+    overlay.style.display = "none";
+  }
+  clearProgressFallbackMessages();
   downloadBtn.disabled = false;
 }

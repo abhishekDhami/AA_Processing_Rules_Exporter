@@ -180,7 +180,7 @@ downloadBtn.addEventListener("click", async () => {
     });
 
     // 🔥 Find the frame which returned valid data
-    const validResult = results.find((r) => r.result && r.result.processing_rules);
+    const validResult = results.find((r) => Array.isArray(r.result) && r.result[0] && r.result[0].processing_rules);
 
     if (!validResult) {
       const errors = results.map((r) => r.result?.error).filter(Boolean);
@@ -193,6 +193,7 @@ downloadBtn.addEventListener("click", async () => {
     }
 
     const data = validResult.result;
+    const reportSuiteExport = data[0];
 
     clearProgressFallbackMessages();
     updateActiveStatus("Creating download file...");
@@ -205,7 +206,7 @@ downloadBtn.addEventListener("click", async () => {
 
     const a = document.createElement("a");
     a.href = url;
-    a.download = `processing_rules_${data.rsid || "unknown"}_${Date.now()}.json`;
+    a.download = `processing_rules_${reportSuiteExport.rsid || "unknown"}_${Date.now()}.json`;
     a.click();
 
     clearProgressFallbackMessages();
@@ -423,51 +424,203 @@ async function extractRules() {
 
     logs.push(`Filtered ${rawRules.length} items to ${filtered.length} visible rules.`);
 
-    const transformed = filtered.map((rule, index) => ({
-      editable: rule.editable === 1 || rule.editable === true,
-      title: rule.title,
-      comment: rule.comment,
-      matchOn: rule.junction || undefined,
-      rules: (rule.rules || []).map((r) => {
-        if (r.matchOperator === "isset") {
-          return `if ${r.matchHitAttribute} isset`;
-        }
-        if (r.matchOperator === "equals") {
-          return `if ${r.matchHitAttribute} equals '${r.matches?.[0] || ""}'`;
-        }
-        return "";
-      }),
-      actions: (rule.actions || []).map((a) => {
-        let actionStr = "";
+    function isEnabled(value) {
+      return value === 1 || value === "1" || value === true;
+    }
 
-        if (a.actionOperator === "setvalueof") {
-          actionStr = `overwrite value of ${a.matchFromAttribute} with ${a.matchToAttribute}`;
-        } else if (a.actionOperator === "setevent") {
-          const value = a.customEventValue || "1";
+    function quoteValue(value) {
+      return `'${String(value ?? "")}'`;
+    }
 
-          if (typeof value === "string" && value.startsWith("contextdata")) {
-            actionStr = `set ${a.setEvent} to ${value}`;
-          } else {
-            actionStr = `set ${a.setEvent} to custom value '${value}'`;
-          }
+    function normalizeMatches(value) {
+      if (Array.isArray(value)) {
+        return value.filter((item) => item !== undefined && item !== null && String(item) !== "").map(String);
+      }
+      if (value === undefined || value === null || value === "") {
+        return [];
+      }
+      return [String(value)];
+    }
+
+    function formatCondition(attribute, operator, matches, options = {}) {
+      const warnings = options.warnings || [];
+      const raw = options.raw;
+      const forceAnyOf = options.forceAnyOf === true;
+      const valueSeparator = options.valueSeparator || ", ";
+      const knownOperators = ["isset", "isnotset", "equals", "notequals", "contains", "notcontains", "startswith", "notstartswith", "endswith", "notendswith"];
+
+      if (!attribute || !operator) {
+        warnings.push("Condition is missing an attribute or operator.");
+        return `[Unsupported condition: missing attribute/operator]`;
+      }
+
+      if (!knownOperators.includes(operator)) {
+        warnings.push(`Unsupported condition operator: ${operator}`);
+        return `[Unsupported conditionOperator: ${operator}] ${attribute}`;
+      }
+
+      if (operator === "isset" || operator === "isnotset") {
+        return `if ${attribute} ${operator}`;
+      }
+
+      const values = normalizeMatches(matches);
+      if (!values.length) {
+        warnings.push(`Condition operator '${operator}' has no match value.`);
+        return `if ${attribute} ${operator} ''`;
+      }
+
+      if (forceAnyOf || values.length > 1) {
+        return `if ${attribute} ${operator} any of (${values.join(valueSeparator)})`;
+      }
+
+      return `if ${attribute} ${operator} ${quoteValue(values[0])}`;
+    }
+
+    function formatRuleCondition(condition, warnings) {
+      return formatCondition(condition?.matchHitAttribute || condition?.matchHitAttributeOverride, condition?.matchOperator, condition?.matches, { warnings, raw: condition });
+    }
+
+    function formatActionCondition(action, warnings) {
+      return formatCondition(action?.conditionMatchFromAttribute, action?.conditionMatchOperator, action?.conditionMatchToAttribute, {
+        warnings,
+        raw: action,
+        forceAnyOf: Array.isArray(action?.conditionMatchToAttribute) && action.conditionMatchToAttribute.length > 0,
+        valueSeparator: ",",
+      });
+    }
+
+    function formatConcatenatedValue(action, warnings) {
+      const options = Array.isArray(action?.concatOptions) ? action.concatOptions : [];
+      if (!options.length) {
+        warnings.push("Concatenated value action has no concatOptions.");
+        return "concatenated value ()";
+      }
+
+      const delimiter = action.delimiter || "";
+      const separator = delimiter ? ` ${delimiter} ` : " ";
+      const parts = options.map((option) => {
+        if (option?.value === "customvalue") {
+          return String(option?.customvalue ?? "");
         }
+        return String(option?.value ?? "");
+      });
 
-        if (a.actionConditionOn === 1 && a.conditionMatchFromAttribute) {
-          return `if ${a.conditionMatchFromAttribute} ${a.conditionMatchOperator}, then ${actionStr}`;
+      return `concatenated value (${parts.join(separator)})`;
+    }
+
+    function formatSetValueAction(action, warnings) {
+      const destination = action?.matchFromAttribute || "";
+      const source = action?.matchToAttribute || "";
+
+      if (!destination) {
+        warnings.push("setvalueof action is missing matchFromAttribute.");
+      }
+
+      if (source === "customvalue") {
+        return `overwrite value of ${destination} with custom value ${quoteValue(action?.customValue ?? "")}`;
+      }
+
+      if (source === "concatenatedvalue") {
+        return `overwrite value of ${destination} with ${formatConcatenatedValue(action, warnings)}`;
+      }
+
+      if (!source) {
+        warnings.push("setvalueof action is missing matchToAttribute.");
+        return `overwrite value of ${destination} with [Unsupported empty source]`;
+      }
+
+      return `overwrite value of ${destination} with ${source}`;
+    }
+
+    function formatSetEventAction(action, warnings) {
+      const eventName = action?.setEvent || action?.matchFromAttribute || "";
+      if (!eventName) {
+        warnings.push("setevent action is missing setEvent/matchFromAttribute.");
+      }
+
+      const eventValueType = action?.eventMatchToAttribute || action?.actionQueryVar || "customvalue";
+      const value = action?.customEventValue !== undefined && action?.customEventValue !== "" ? action.customEventValue : "1";
+
+      if (eventValueType === "customvalue" || action?.actionQueryVar === "customvalue") {
+        return `set ${eventName} to custom value ${quoteValue(value)}`;
+      }
+
+      return `set ${eventName} to ${value}`;
+    }
+
+    function formatDeleteValueAction(action, warnings) {
+      const destination = action?.matchFromAttribute || "";
+      if (!destination) {
+        warnings.push("deletevalueof action is missing matchFromAttribute.");
+        return "delete value of [Unsupported empty destination]";
+      }
+      return `delete value of ${destination}`;
+    }
+
+    function formatAction(action, warnings) {
+      let actionText = "";
+
+      if (action?.actionOperator === "setvalueof") {
+        actionText = formatSetValueAction(action, warnings);
+      } else if (action?.actionOperator === "setevent") {
+        actionText = formatSetEventAction(action, warnings);
+      } else if (action?.actionOperator === "deletevalueof") {
+        actionText = formatDeleteValueAction(action, warnings);
+      } else {
+        const operator = action?.actionOperator || "missing";
+        warnings.push(`Unsupported action operator: ${operator}`);
+        actionText = `[Unsupported actionOperator: ${operator}]`;
+      }
+
+      if (isEnabled(action?.actionConditionOn) && action?.conditionMatchFromAttribute) {
+        return `${formatActionCondition(action, warnings)}, then ${actionText}`;
+      }
+
+      return actionText;
+    }
+
+    function transformRule(rule, index) {
+      const warnings = [];
+      const output = {
+        editable: rule.editable === 1 || rule.editable === true || rule.editable === "1",
+        title: rule.title,
+        comment: rule.comment,
+      };
+
+      const formattedRules = (rule.rules || []).map((condition) => formatRuleCondition(condition, warnings));
+      if (formattedRules.length) {
+        if (formattedRules.length > 1 && rule.junction) {
+          output.matchOn = rule.junction;
         }
+        output.rules = formattedRules;
+      }
 
-        return actionStr;
-      }),
-      ruleNum: index + 1,
-    }));
+      output.actions = (rule.actions || []).map((action) => formatAction(action, warnings));
+
+      const formattedElseActions = (rule.elseActions || []).map((action) => formatAction(action, warnings));
+      if (formattedElseActions.length) {
+        output.elseActions = formattedElseActions;
+      }
+
+      output.ruleNum = index + 1;
+
+      if (warnings.length) {
+        output._exporterWarnings = Array.from(new Set(warnings));
+        output._exporterRaw = rule;
+      }
+
+      return output;
+    }
+
+    const transformed = filtered.map((rule, index) => transformRule(rule, index));
 
     logs.push(`Transformed ${transformed.length} rules successfully.`);
     logs.push(`SUCCESSFUL: Processing rules extracted.`);
 
-    return {
+    return [{
       rsid: extractRSID(),
       processing_rules: transformed,
-    };
+    }];
   } catch (e) {
     const logs = [];
     logs.push(`EXCEPTION: ${e?.message || String(e)}`);

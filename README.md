@@ -42,15 +42,19 @@ This extension provides a **simple workaround** by extracting rules directly fro
 
 Use this if your organization does not allow Chrome extensions.
 
-1. Open Adobe Analytics
-2. Navigate to the **Processing Rules** page
-3. Wait until the rules are fully loaded
-4. Open DevTools → Console
-5. Copy the latest `console-script.js` from this repository
-6. Paste it into the Console and press Enter
-7. A JSON file will download locally
+1. Open Adobe Analytics.
+2. Navigate to the Processing Rules page.
+3. Wait until the rules are fully loaded.
+4. Open DevTools → Console.
+5. In the Console context/frame dropdown, select **Main Content (index.html)** under the Adobe domain, for example `www4.an.adobe.com`.
+6. Copy the latest `console-script.js` from this repository.
+7. Paste it into the Console and press Enter.
+8. A JSON file will download locally.
+
+The script must run in the Processing Rules frame. If another frame such as `top`, an extension frame, or another Adobe frame is selected, the script may not find the Processing Rules data.
 
 Before running the console script, review it and confirm it does not contain external network calls such as `fetch`, `XMLHttpRequest`, or `sendBeacon`.
+
 
 Both options:
 

@@ -11,25 +11,191 @@ const longWaitMessages = [
   "The browser is doing its magic...",
 ];
 
+
+function normalizeForLog(value) {
+  if (value === undefined || value === null || value === "") return "";
+  return String(value);
+}
+
+function getFrameProbeSummary(frameProbeResults = []) {
+  return frameProbeResults.map((r, index) => {
+    const result = r.result || {};
+    return {
+      index,
+      frameId: r.frameId,
+      documentId: r.documentId,
+      title: normalizeForLog(result.title),
+      href: normalizeForLog(result.href),
+      readyState: normalizeForLog(result.readyState),
+      scriptCount: typeof result.scriptCount === "number" ? result.scriptCount : "",
+      matchingScriptCount: typeof result.matchingScriptCount === "number" ? result.matchingScriptCount : "",
+      hasCreateRuleSetsFromUI: result.hasCreateRuleSetsFromUI === true,
+      hasMatchOperator: result.hasMatchOperator === true,
+      hasActionOperator: result.hasActionOperator === true,
+      hasElseActions: result.hasElseActions === true,
+      hasSelectedRsid: result.hasSelectedRsid === true,
+      hasRsidList: result.hasRsidList === true,
+      probeError: normalizeForLog(result.error),
+    };
+  });
+}
+
+function getExtractionFrameSummary(results = []) {
+  return results.map((r, index) => {
+    const result = r.result;
+    const isExportArray = Array.isArray(result);
+    const firstItem = isExportArray ? result[0] : null;
+    const diagnostics = result && !isExportArray ? result.diagnostics || {} : {};
+
+    return {
+      index,
+      frameId: r.frameId,
+      documentId: r.documentId,
+      hasResult: !!result,
+      isExportArray,
+      rsid: normalizeForLog(firstItem?.rsid),
+      ruleCount: Array.isArray(firstItem?.processing_rules) ? firstItem.processing_rules.length : "",
+      hasError: !!(result && !isExportArray && result.error),
+      error: normalizeForLog(result && !isExportArray ? result.error : ""),
+      diagnosticTitle: normalizeForLog(diagnostics.title),
+      diagnosticScriptCount: typeof diagnostics.scriptCount === "number" ? diagnostics.scriptCount : "",
+      diagnosticMatchingScriptCount: typeof diagnostics.matchingScriptCount === "number" ? diagnostics.matchingScriptCount : "",
+      diagnosticReason: normalizeForLog(diagnostics.reason),
+      diagnosticStepCount: Array.isArray(diagnostics.steps) ? diagnostics.steps.length : "",
+    };
+  });
+}
+
+function buildCombinedDiagnostics({ message, tab, frameProbeResults = [], extractionResults = [], selectedFrame = null, finalStatus = "unknown", exception = null } = {}) {
+  const frameProbeSummary = getFrameProbeSummary(frameProbeResults);
+  const extractionFrameSummary = getExtractionFrameSummary(extractionResults);
+  const selectedResult = selectedFrame?.result;
+  const selectedFirstItem = Array.isArray(selectedResult) ? selectedResult[0] : null;
+  const selectedFrameSummary = selectedFrame
+    ? {
+        frameId: selectedFrame.frameId,
+        documentId: selectedFrame.documentId,
+        rsid: normalizeForLog(selectedFirstItem?.rsid),
+        ruleCount: Array.isArray(selectedFirstItem?.processing_rules) ? selectedFirstItem.processing_rules.length : "",
+      }
+    : null;
+
+  const steps = [
+    `Popup started extraction for active tab: ${tab?.title || "unknown"}`,
+    `Active tab URL: ${tab?.url || "unknown"}`,
+    `Frame probe results received: ${frameProbeSummary.length}`,
+    `Extraction frame results received: ${extractionFrameSummary.length}`,
+    `Final status: ${finalStatus}`,
+  ];
+
+  if (selectedFrameSummary) {
+    steps.push(`Selected valid frame: frameId=${selectedFrameSummary.frameId}, documentId=${selectedFrameSummary.documentId}`);
+    steps.push(`Selected frame export: rsid=${selectedFrameSummary.rsid || "unknown"}, rules=${selectedFrameSummary.ruleCount}`);
+  }
+
+  if (exception) {
+    steps.push(`Exception: ${exception?.message || String(exception)}`);
+  }
+
+  return {
+    title: tab?.title || "Unknown",
+    href: tab?.url || "",
+    reason: finalStatus,
+    userAgent: navigator.userAgent,
+    steps,
+    frameProbeSummary,
+    extractionFrameSummary,
+    selectedFrameSummary,
+    rawFrameDiagnostics: extractionResults
+      .map((r, index) => ({
+        index,
+        frameId: r.frameId,
+        documentId: r.documentId,
+        diagnostics: r.result && !Array.isArray(r.result) ? r.result.diagnostics || null : null,
+      }))
+      .filter((item) => item.diagnostics),
+  };
+}
+
 function escapeHtml(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function generateLogContent(message, diagnostics = {}) {
   const timestamp = new Date().toISOString();
-  const lines = ["=== AA Processing Rules Exporter - Diagnostic Log ===", `Timestamp: ${timestamp}`, "", `Error: ${message}`, ""];
+  const lines = ["=== AA Processing Rules Exporter - Diagnostic Log ===", `Timestamp: ${timestamp}`, "", `Status/Error: ${message}`, ""];
 
   if (diagnostics.title) {
     lines.push(`Page Title: ${diagnostics.title}`);
   }
 
-  lines.push("", "--- Extraction Process ---");
+  if (diagnostics.href) {
+    lines.push(`Page URL: ${diagnostics.href}`);
+  }
+
+  if (diagnostics.userAgent) {
+    lines.push(`Browser/User Agent: ${diagnostics.userAgent}`);
+  }
+
+  lines.push("", "--- Popup / Extension Process ---");
   if (Array.isArray(diagnostics.steps)) {
     diagnostics.steps.forEach((step, idx) => {
       lines.push(`Step ${idx + 1}: ${step}`);
     });
   }
 
+  if (Array.isArray(diagnostics.frameProbeSummary) && diagnostics.frameProbeSummary.length) {
+    lines.push("", "--- Frame Probe Summary ---");
+    diagnostics.frameProbeSummary.forEach((frame) => {
+      lines.push(`Frame result index: ${frame.index}`);
+      lines.push(`  frameId: ${frame.frameId}`);
+      lines.push(`  documentId: ${frame.documentId || ""}`);
+      lines.push(`  title: ${frame.title || ""}`);
+      lines.push(`  href: ${frame.href || ""}`);
+      lines.push(`  readyState: ${frame.readyState || ""}`);
+      lines.push(`  scriptCount: ${frame.scriptCount}`);
+      lines.push(`  matchingScriptCount(createRuleSetsFromUI): ${frame.matchingScriptCount}`);
+      lines.push(`  hasCreateRuleSetsFromUI: ${frame.hasCreateRuleSetsFromUI}`);
+      lines.push(`  hasMatchOperator: ${frame.hasMatchOperator}`);
+      lines.push(`  hasActionOperator: ${frame.hasActionOperator}`);
+      lines.push(`  hasElseActions: ${frame.hasElseActions}`);
+      lines.push(`  hasSelectedRsid: ${frame.hasSelectedRsid}`);
+      lines.push(`  hasRsidList: ${frame.hasRsidList}`);
+      if (frame.probeError) lines.push(`  probeError: ${frame.probeError}`);
+      lines.push("");
+    });
+  }
+
+  if (Array.isArray(diagnostics.extractionFrameSummary) && diagnostics.extractionFrameSummary.length) {
+    lines.push("", "--- Extraction Frame Result Summary ---");
+    diagnostics.extractionFrameSummary.forEach((frame) => {
+      lines.push(`Frame result index: ${frame.index}`);
+      lines.push(`  frameId: ${frame.frameId}`);
+      lines.push(`  documentId: ${frame.documentId || ""}`);
+      lines.push(`  hasResult: ${frame.hasResult}`);
+      lines.push(`  isExportArray: ${frame.isExportArray}`);
+      lines.push(`  rsid: ${frame.rsid || ""}`);
+      lines.push(`  ruleCount: ${frame.ruleCount}`);
+      lines.push(`  hasError: ${frame.hasError}`);
+      if (frame.error) lines.push(`  error: ${frame.error}`);
+      lines.push(`  diagnosticTitle: ${frame.diagnosticTitle || ""}`);
+      lines.push(`  diagnosticScriptCount: ${frame.diagnosticScriptCount}`);
+      lines.push(`  diagnosticMatchingScriptCount: ${frame.diagnosticMatchingScriptCount}`);
+      lines.push(`  diagnosticReason: ${frame.diagnosticReason || ""}`);
+      lines.push(`  diagnosticStepCount: ${frame.diagnosticStepCount}`);
+      lines.push("");
+    });
+  }
+
+  if (diagnostics.selectedFrameSummary) {
+    lines.push("", "--- Selected Valid Frame ---");
+    lines.push(`frameId: ${diagnostics.selectedFrameSummary.frameId}`);
+    lines.push(`documentId: ${diagnostics.selectedFrameSummary.documentId || ""}`);
+    lines.push(`rsid: ${diagnostics.selectedFrameSummary.rsid || ""}`);
+    lines.push(`ruleCount: ${diagnostics.selectedFrameSummary.ruleCount}`);
+  }
+
+  // Backward-compatible single-frame diagnostic details.
   if (typeof diagnostics.scriptCount === "number") {
     lines.push("", "--- Script Analysis ---");
     lines.push(`Total scripts scanned: ${diagnostics.scriptCount}`);
@@ -38,8 +204,26 @@ function generateLogContent(message, diagnostics = {}) {
     lines.push(`Scripts with 'createRuleSetsFromUI': ${diagnostics.matchingScriptCount}`);
   }
 
+  if (Array.isArray(diagnostics.rawFrameDiagnostics) && diagnostics.rawFrameDiagnostics.length) {
+    lines.push("", "--- Per-Frame Extraction Steps ---");
+    diagnostics.rawFrameDiagnostics.forEach((item) => {
+      const d = item.diagnostics || {};
+      lines.push(`Frame result index: ${item.index} | frameId: ${item.frameId} | documentId: ${item.documentId || ""}`);
+      if (d.title) lines.push(`  Page Title: ${d.title}`);
+      if (typeof d.scriptCount === "number") lines.push(`  Scripts scanned: ${d.scriptCount}`);
+      if (typeof d.matchingScriptCount === "number") lines.push(`  Scripts with createRuleSetsFromUI: ${d.matchingScriptCount}`);
+      if (d.reason) lines.push(`  Reason: ${d.reason}`);
+      if (Array.isArray(d.steps)) {
+        d.steps.forEach((step, idx) => {
+          lines.push(`  Step ${idx + 1}: ${step}`);
+        });
+      }
+      lines.push("");
+    });
+  }
+
   if (diagnostics.reason) {
-    lines.push("", "--- Failure Summary ---");
+    lines.push("", "--- Summary ---");
     lines.push(diagnostics.reason);
   }
 
@@ -132,11 +316,40 @@ function updateLoadingMessage(message) {
   }
 }
 
+function clearTextAnimationTimers() {
+  if (!animateTextChange.timers) return;
+  Object.keys(animateTextChange.timers).forEach((key) => {
+    clearTimeout(animateTextChange.timers[key]);
+  });
+  animateTextChange.timers = {};
+}
+
 function renderStatus(message, isError = false, diagnostics = {}) {
+  clearTextAnimationTimers();
   const status = document.getElementById("status");
+  const hasDiagnostics = diagnostics && Object.keys(diagnostics).length > 0;
 
   if (!isError) {
-    status.innerHTML = escapeHtml(message);
+    if (hasDiagnostics) {
+      status.innerHTML = `
+        <div style="margin-bottom: 8px;">${escapeHtml(message)}</div>
+        <div>
+          <a href="#" id="downloadLogsLink" style="font-size: 11px; color: #2563eb; text-decoration: underline; cursor: pointer;">
+            Download Logs
+          </a>
+        </div>
+      `;
+
+      const logsLink = document.getElementById("downloadLogsLink");
+      if (logsLink) {
+        logsLink.addEventListener("click", (e) => {
+          e.preventDefault();
+          downloadLogFile(message, diagnostics);
+        });
+      }
+    } else {
+      status.innerHTML = escapeHtml(message);
+    }
     status.style.opacity = "1";
     return;
   }
@@ -164,20 +377,89 @@ function renderStatus(message, isError = false, diagnostics = {}) {
   }
 }
 
+function probeFrameForProcessingRules() {
+  try {
+    const scripts = Array.from(document.querySelectorAll("script"));
+    const selectedRsid = document.querySelector("#selected_rsid");
+    const rsidList = document.querySelector("#rsidlist");
+    const matchingScriptIndexes = [];
+
+    function scriptHas(keyword) {
+      return scripts.some((script) => {
+        const content = script.textContent || script.innerHTML || "";
+        return content.includes(keyword);
+      });
+    }
+
+    scripts.forEach((script, index) => {
+      const content = script.textContent || script.innerHTML || "";
+      if (content.includes("createRuleSetsFromUI")) {
+        matchingScriptIndexes.push(index + 1);
+      }
+    });
+
+    return {
+      title: document.title || "Unknown",
+      href: window.location?.href || "",
+      readyState: document.readyState || "",
+      scriptCount: scripts.length,
+      matchingScriptCount: matchingScriptIndexes.length,
+      matchingScriptIndexes: matchingScriptIndexes.slice(0, 10),
+      hasCreateRuleSetsFromUI: matchingScriptIndexes.length > 0,
+      hasMatchOperator: scriptHas("matchOperator"),
+      hasActionOperator: scriptHas("actionOperator"),
+      hasElseActions: scriptHas("elseActions"),
+      hasSelectedRsid: !!selectedRsid,
+      hasRsidList: !!rsidList,
+    };
+  } catch (e) {
+    return {
+      error: e?.message || String(e),
+      title: document.title || "Unknown",
+      href: window.location?.href || "",
+    };
+  }
+}
+
+
 downloadBtn.addEventListener("click", async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const status = document.getElementById("status");
+  let frameProbeResults = [];
+  let results = [];
+
 
   try {
     showLoader("Preparing extraction...");
     updateActiveStatus("Fetching processing rules...");
     startFetchingFallbackMessages();
 
-    const results = await chrome.scripting.executeScript({
+    try {
+      frameProbeResults = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: probeFrameForProcessingRules,
+        world: "MAIN",
+      });
+    } catch (probeError) {
+      frameProbeResults = [
+        {
+          frameId: "probe_failed",
+          documentId: "",
+          result: {
+            error: probeError?.message || String(probeError),
+            title: tab?.title || "Unknown",
+            href: tab?.url || "",
+          },
+        },
+      ];
+    }
+
+
+    results = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true }, //
       func: extractRules,
       world: "MAIN",
     });
+
 
     // 🔥 Find the frame which returned valid data
     const validResult = results.find((r) => Array.isArray(r.result) && r.result[0] && r.result[0].processing_rules);
@@ -185,10 +467,17 @@ downloadBtn.addEventListener("click", async () => {
     if (!validResult) {
       const errors = results.map((r) => r.result?.error).filter(Boolean);
       const errorMsg = errors[0] || "Unable to extract processing rules.";
-      const diagnostics = results.map((r) => r.result?.diagnostics).filter(Boolean)[0] || {};
+      const diagnostics = buildCombinedDiagnostics({
+        message: errorMsg,
+        tab,
+        frameProbeResults,
+        extractionResults: results,
+        finalStatus: "failure_no_valid_processing_rules_result",
+      });
 
-      renderStatus(errorMsg, true, diagnostics);
+      clearProgressFallbackMessages();
       hideLoader();
+      renderStatus(errorMsg, true, diagnostics);
       return;
     }
 
@@ -209,19 +498,32 @@ downloadBtn.addEventListener("click", async () => {
     a.download = `processing_rules_${reportSuiteExport.rsid || "unknown"}_${Date.now()}.json`;
     a.click();
 
-    clearProgressFallbackMessages();
-    updateActiveStatus("Download complete");
-    renderStatus("Downloaded successfully!", false);
-    hideLoader();
-  } catch (err) {
-    console.error("Extraction failed", err);
-    clearProgressFallbackMessages();
-    updateActiveStatus("Extraction failed");
-    renderStatus("Failed to extract rules.", true, {
-      title: tab?.title,
-      reason: err?.message || String(err),
+    const successDiagnostics = buildCombinedDiagnostics({
+      message: "Downloaded successfully!",
+      tab,
+      frameProbeResults,
+      extractionResults: results,
+      selectedFrame: validResult,
+      finalStatus: "success",
     });
+
+    clearProgressFallbackMessages();
     hideLoader();
+    renderStatus("Downloaded successfully!", false, successDiagnostics);
+  } catch (err) {
+    const errorMsg = err?.message || String(err);
+    const diagnostics = buildCombinedDiagnostics({
+      message: errorMsg,
+      tab,
+      frameProbeResults,
+      extractionResults: results,
+      finalStatus: "exception",
+      exception: err,
+    });
+
+    clearProgressFallbackMessages();
+    hideLoader();
+    renderStatus("Failed to extract rules.", true, diagnostics);
   }
 });
 
